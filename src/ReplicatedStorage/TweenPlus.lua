@@ -100,7 +100,9 @@ function TweenHandle:Play()
             pcall(self.OnStart, self)
         end
 
-        self._rsConn = RunService.RenderStepped:Connect(function()
+        local tickEvent = RunService:IsClient() and RunService.RenderStepped
+                                    or RunService.Heartbeat
+        self._rsConn = tickEvent:Connect(function()
             self._frames += 1
         end)
     end
