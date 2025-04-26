@@ -23,26 +23,6 @@ local function newHandle(tween)
     return self
 end
 
-function TweenHandle:Play()
-    if self._canceled then return self end
-
-    if not self._startClock then
-        self._startClock = os.clock()
-
-        self._rsConn = RunService.RenderStepped:Connect(function()
-            self._frames += 1
-        end)
-    end
-
-    self._tween:Play()
-    return self
-end
-
-function TweenHandle:Then(nextItem)
-    table.insert(self._chain, nextItem)
-    return self
-end
-
 function TweenHandle:_advance()
     if self._canceled then return end
 
@@ -61,6 +41,26 @@ function TweenHandle:_advance()
         nextItem:Then(function() self:_advance() end)
         nextItem:Play()
     end
+end
+
+function TweenHandle:Play()
+    if self._canceled then return self end
+
+    if not self._startClock then
+        self._startClock = os.clock()
+
+        self._rsConn = RunService.RenderStepped:Connect(function()
+            self._frames += 1
+        end)
+    end
+
+    self._tween:Play()
+    return self
+end
+
+function TweenHandle:Then(nextItem)
+    table.insert(self._chain, nextItem)
+    return self
 end
 
 function TweenHandle:Wait(seconds)
@@ -84,14 +84,14 @@ end
 function TweenHandle:Debug(message)
     local tag = self._tag or "untagged"
     return self:Then(function(resolve)
-        local stamp
+        local timeStamp
         if self._startClock then
-            stamp = string.format("+%.2fs", os.clock() - self._startClock)
+            timeStamp = string.format("+%.2fs", os.clock() - self._startClock)
         else
-            stamp = "+0.00s"
+            timeStamp = "+0.00s"
         end
 
-        print(string.format("[TweenPlus][%s] [%s] %s", tag, stamp, tostring(message)))
+        print(string.format("[TweenPlus][%s] [%s] %s", tag, timeStamp, tostring(message)))
         resolve()
     end)
 end
