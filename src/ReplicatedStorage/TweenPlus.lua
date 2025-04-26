@@ -19,6 +19,10 @@ local function newHandle(tween, startValues)
         _tag = nil,
         _instance = nil,
 
+        OnStart       = nil,
+        OnComplete    = nil,
+        OnCancel      = nil,
+
         _startClock = nil,
         _frames = 0,
 
@@ -65,10 +69,14 @@ function TweenHandle:_advance()
             self._chain = table.clone(self._loopOriginal)
             self._tween:Play()
         else
+            if type(self.OnComplete) == "function" then
+                pcall(self.OnComplete, self)
+            end
             if self._rsConn then
                 self._rsConn:Disconnect()
                 self._rsConn = nil
             end
+            self:_cleanup()
         end
 
         return
@@ -87,6 +95,10 @@ function TweenHandle:Play()
 
     if not self._startClock then
         self._startClock = os.clock()
+
+        if type(self.OnStart) == "function" then
+            pcall(self.OnStart, self)
+        end
 
         self._rsConn = RunService.RenderStepped:Connect(function()
             self._frames += 1
@@ -122,8 +134,15 @@ end
 function TweenHandle:Cancel()
     if self._canceled then return end
     self._canceled = true
+
+    if type(self.OnCancel) == "function" then
+        pcall(self.OnCancel, self)
+    end
+
     self._tween:Cancel()
     if self._connection then self._connection:Disconnect() end
+    if self._rsConn then self._rsConn:Disconnect() end
+    self:_cleanup()
 end
 
 function TweenHandle:Tag(tagName)
@@ -158,6 +177,13 @@ function TweenHandle:_rewind()
     for prop, value in pairs(self._startValues) do
         self._tween.Instance[prop] = value
     end
+end
+
+function TweenHandle:_cleanup()
+    self._tween = nil
+    self._chain = nil
+    self._loopOriginal = nil
+    self._startValues = nil
 end
 
 function TweenPlus:Create(instance, tweenInfo, goals)
