@@ -8,32 +8,34 @@ part.Size = Vector3.new(2, 2, 2)
 part.Position = Vector3.new(0, 0.5, -20)
 part.Anchored = true
 
-local h = TweenPlus
-    :Debug("starting tween")
-    :Create(part, TweenInfo.new(0.5), {Position = part.Position + Vector3.new(0,3,0)})
-    :Tag("FastRiseThenDrop")
-    :Wait(0.2)
+TweenPlus:CreatePreset(
+    "SlideInFast",
+    TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+    { Position = part.Position + Vector3.new(0, 5, 0) }
+)
+
+local slide1 = TweenPlus
+    :ApplyPreset("SlideInFast", part)
+    :Tag("Slide1")
     :Debug("at the top")
-    :Wait(1)
-    :Then(TweenPlus:Create(part, TweenInfo.new(0.5), {Position = part.Position}))
-    :Wait(0.2)
+    :Wait(0.5)
+    :Then(TweenPlus:Create(part, TweenInfo.new(0.2), {Position = part.Position}))
     :Debug("at the bottom")
+    :Wait(0.5)
 
-local move = TweenPlus
-    :Debug("starting tween")
-    :Create(part, TweenInfo.new(1), {Position = part.Position + Vector3.new(0,5,0)})
-    :Tag("RiseThenDrop")
-    :Wait(0.2)
+local slideLoop = TweenPlus
+    :ApplyPreset("SlideInFast", part)
+    :Tag("LoopedSlide")
     :Debug("at the top")
-    :Wait(1)
-    :Then(TweenPlus:Create(part, TweenInfo.new(1), {Position = part.Position}))
-    :Wait(0.2)
+    :Wait(0.5)
+    :Then(TweenPlus:Create(part, TweenInfo.new(0.2), {Position = part.Position}))
     :Debug("at the bottom")
+    :Wait(0.5)
+    :Loop("infinite")
 
-task.wait(1.5)
-
-move:Then(h):Play()
-task.delay(4.25, function()
-    print(">>> cancel FastRiseThenDrop")
-    h:Cancel()
-end)
+task.wait(1)
+slide1:Play()
+    :Then(function(resolve)
+        slideLoop:Play()
+        resolve()
+    end)
