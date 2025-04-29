@@ -2,59 +2,59 @@
 -- Script Name: TweenPlus.lua
 -- Project: TweenPlus
 -- Author: ItsAltus (GitHub) / DrChicken2424 (Roblox)
--- Description: Chain-friendly wrapper around Roblox TweenService
+-- Description: Chain-friendly wrapper around native TweenService
 --              that supports
---                 * clean Then / Wait / Loop syntax
+--                 * Then / Wait / Loop syntax
 --                 * reusable animation presets
 --                 * batch cancellation (by tag or instance)
---                 * optional OnStart / OnComplete / OnCancel
---                 * zero-leak cleanup
+--                 * OnStart / OnComplete / OnCancel flags
+--                 * support for GC and manual cleanup
 -- ============================================================
 
----------------------------------------------------------------
--- SERVICES
----------------------------------------------------------------
+--// SERVICES
 local TweenService = game:GetService("TweenService")
-local RunService = game:GetService("RunService")
 
----------------------------------------------------------------
--- MODULE TABLES & WEAK REGISTRIES
----------------------------------------------------------------
-local TweenPlus = {} ; TweenPlus.__index   = TweenPlus
+--// MODULE TABLES
 local TweenHandle = {} ; TweenHandle.__index = TweenHandle
+local TweenPlus = {} ; TweenPlus.__index = TweenPlus
 
--- tag -> {TweenHandle,…}
 local _handlesByTag = {}
 
--- instance -> {TweenHandle,…} (weak keys so finished handles garbage collect)
-local _handlesByInstance = setmetatable({}, {__mode = "k"})
+local _handlesByInstance = setmetatable({}, {__mode = "k"}) -- weak key to prevent leaks if instance destroyed
 
--- presetName -> {tweenInfo = TweenInfo, goals = table}
 local _presets = {}
 
----------------------------------------------------------------
--- HELPER: create a fully-wired TweenHandle
----------------------------------------------------------------
-local function newHandle(tween: Tween, startValues: table)
+-- ============================================================
+--// PRIVATE METHODS
+-- ============================================================
+
+--[[
+Function: _newHandle
+Description: Creates and registers a new TweenHandle for managing a tween's internal state,
+             supporting rewinds, chaining, callbacks, and automatic cleanup.
+Parameters:
+    - <tween> (Tween) - The instance of the desired tween.
+    - <startValues> (table) - Stores the start values for rewinding the tween.
+Returns:
+    - (TweenHandle) - A table representing the internal state of the tween.
+]]
+local function _newHandle(tween, startValues)
     local self = setmetatable({
-        -- tween internals
         _tween = tween,
         _startValues = startValues, -- for rewinds
         _chain = {}, -- queue of funcs / handles
         _canceled = false,
         _connection = nil, -- completed conn
-        _rsConn = nil, -- frame counter conn
         _tag = nil,
         _instance = tween.Instance,
 
-        -- user callbacks
+        -- user defined flags
         OnStart = nil,
         OnComplete = nil,
         OnCancel = nil,
 
         -- debug timing
         _startClock = nil,
-        _frames = 0,
 
         -- loop bookkeeping
         _loopOriginal = nil, -- snapshot of first chain
@@ -77,9 +77,19 @@ local function newHandle(tween: Tween, startValues: table)
     return self
 end
 
----------------------------------------------------------------
--- INTERNAL: step through the queued chain / handle looping
----------------------------------------------------------------
+--[[
+Function: _advance
+Description: Internal method for progressing a TweenHandle's chain. If there are any
+             remaining items in the chain, executes the next tween/function. If the
+             chain is empty, either loops the current tween, or finishes and cleans.
+Parameters:
+    - None
+Returns:
+    - None
+Notes:
+    - This is automatically called when the tween completes or when a chained function yields.
+    - Supports infinite (math.huge) or finite loops.
+]]
 function TweenHandle:_advance()
     if self._canceled then return end
 
@@ -114,9 +124,7 @@ function TweenHandle:_advance()
         if type(self.OnComplete) == "function" then
             pcall(self.OnComplete, self)
         end
-        if self._rsConn then
-            self._rsConn:Disconnect()
-        end
+
         self:_cleanup()
         return
     end
@@ -131,42 +139,118 @@ function TweenHandle:_advance()
     end
 end
 
----------------------------------------------------------------
--- PUBLIC (handle): Play / Then / Wait / Loop / Cancel / Tag
----------------------------------------------------------------
+-- Resets each of the tween's properties to their original starting values.
+-- Followed by PLay(), as this only restores values but does not replay the tween itself.
+function TweenHandle:_rewind()
+    if not self._startValues then return end
+    for property, startValue in pairs(self._startValues) do
+        self._tween.Instance[property] = startValue
+    end
+end
+
+-- Manually clears any internal references that may lead to memory leaks.
+-- Called after the tween completes or is canceled to free memory and prevent reuse.
+function TweenHandle:_cleanup()
+    self._tween = nil
+    self._chain = nil
+    self._loopOriginal = nil
+    self._startValues = nil
+end
+
+-- ============================================================
+--// PUBLIC METHODS (TweenHandle)
+-- ============================================================
+
+--[[
+Function: Play
+Description: Begins playback of the tween. If this is the first iteration in a loop, starts the clock
+             and runs the function assigned to the OnStart flag.
+Parameters:
+    - None
+Returns:
+    - (TweenHandle) - The TweenHandle object for chaining.
+]]
 function TweenHandle:Play()
     if self._canceled then return self end
 
-    -- first ever play -> start timing & OnStart
+    -- first ever play -> start timing & OnStart flag
     if not self._startClock then
         self._startClock = os.clock()
 
         if type(self.OnStart) == "function" then
             pcall(self.OnStart, self)
         end
-
-        local evt = RunService:IsClient() and RunService.RenderStepped
-                                         or RunService.Heartbeat
-        self._rsConn = evt:Connect(function()
-            self._frames += 1
-        end)
     end
 
     self._tween:Play()
     return self
 end
 
-function TweenHandle:Then(item) table.insert(self._chain, item);   return self end
-function TweenHandle:Wait(sec) return self:Then(function(r) task.delay(sec,r) end) end
-
-function TweenHandle:Loop(count)
-    if count == "infinite" then count = math.huge end
-    assert(type(count) == "number" and count >= 1, "Loop count must be positive or \"infinite\"")
-    self._loopCount = count
-    self._loopOriginal = table.clone(self._chain)
+--[[
+Function: Then
+Description: Adds a TweenHandle or function into the execution chain to be handled
+             sequentially by _advance.
+Parameters:
+    - <item> (TweenHandle | function) - The tween or function to run next in the chain.
+Returns:
+    - (TweenHandle) - The TweenHandle object for chaining.
+]]
+function TweenHandle:Then(item)
+    table.insert(self._chain, item)
     return self
 end
 
+--[[
+Function: Wait
+Description: Inserts a timed delay into the tween chain. Waits the specified number of seconds before
+             resolving and advancing to the next item.
+Parameters:
+    - <seconds> (number) - The duration in seconds to pause before continuing.
+Returns:
+    - (TweenHandle) - The TweenHandle object for chaining.
+Notes:
+    - Uses Then to insert the wait into the chain, and return to the chain afterwards.
+]]
+function TweenHandle:Wait(seconds)
+    return self:Then(function(resolve)
+        task.delay(seconds, resolve)
+    end)
+end
+
+--[[
+Function: Loop
+Description: Loops the current tween chain for a specified number of iterations,
+             or indefinitely if "infinite" is provided.
+Parameters:
+    - <count> (number | "infinite") - Number of iterations for the tween chain to loop for,
+                                      or "infinite" to loop forever.
+Returns:
+    - (TweenHandle) - The TweenHandle object for chaining.
+Notes:
+    - "infinite" must be lowercase; no other variants ("Infinite", "INFINITE") are accepted.
+    - An assertion error will occur if the count is not a positive number or "infinite".
+]]
+function TweenHandle:Loop(count)
+    if count == "infinite" then count = math.huge end
+    assert(type(count) == "number" and count >= 1, "Loop count must be positive or \"infinite\"") -- if count were <= 0, side effects could occur
+    self._loopCount = count
+    self._loopOriginal = table.clone(self._chain) -- copy of original tween chain for looping purposes
+    return self
+end
+
+--[[
+Function: Cancel
+Description: Cancels the current tween and any remaining chain actions.
+             Runs the function assigned to the OnCancel flag, stops the tween,
+             disconnects events, and performs internal cleanup.
+Parameters:
+    - None
+Returns:
+    - None
+Notes:
+    - After calling Cancel, no further tweens or functions in the chain will run.
+    - Safe to call multiple times; cancellation only occurs once.
+]]
 function TweenHandle:Cancel()
     if self._canceled then return end
     self._canceled = true
@@ -175,14 +259,25 @@ function TweenHandle:Cancel()
     end
     self._tween:Cancel()
     if self._connection then self._connection:Disconnect() end
-    if self._rsConn   then self._rsConn:Disconnect()   end
     self:_cleanup()
 end
 
+--[[
+Function: Tag
+Description: Assigns a tag to the current tween for group management.
+             If a previous tag exists, removes the old tag association before applying the new one.
+Parameters:
+    - <name> (string) - The tag name to assign to this TweenHandle.
+Returns:
+    - (TweenHandle) - The TweenHandle object for chaining.
+Notes:
+    - Tags allow batch operations like CancelByTag on grouped tweens,
+      and print with any tween actions for tracking and debugging.
+]]
 function TweenHandle:Tag(name)
-    if self._tag then -- remove old tag bucket
-        local old = _handlesByTag[self._tag]
-        if old then table.remove(old, table.find(old, self)) end
+    if self._tag then -- preexisting tag, remove it
+        local oldTag = _handlesByTag[self._tag]
+        if oldTag then table.remove(oldTag, table.find(oldTag, self)) end
     end
     self._tag = name
     _handlesByTag[name] = _handlesByTag[name] or {}
@@ -190,34 +285,48 @@ function TweenHandle:Tag(name)
     return self
 end
 
--- inline debug print
-function TweenHandle:Debug(msg)
+--[[
+Function: Debug
+Description: Prints a desired message to the console, formatted to include:
+                * The fixed module label [TweenPlus]
+                * The tween's tag (or "untagged" if none is set)
+                * The elapsed time since the tween started
+                * The user's provided message
+Parameters:
+    - <message> (string) - The custom debug message to print to the console.
+Returns:
+    - (TweenHandle) — The TweenHandle object for chaining.
+Notes:
+    - Useful for tracking the progression of chained tweens during execution.
+]]
+function TweenHandle:Debug(message)
     local tag = self._tag or "untagged"
     return self:Then(function(resolve)
         local dt = self._startClock and (os.clock() - self._startClock) or 0
-        print(("[TweenPlus][%s] [+%.2fs] %s"):format(tag, dt, msg))
+        print(("[TweenPlus][%s] [+%.2fs] %s"):format(tag, dt, message))
         resolve()
     end)
 end
 
----------------------------------------------------------------
--- INTERNAL: rewind & hard cleanup
----------------------------------------------------------------
-function TweenHandle:_rewind()
-    if not self._startValues then return end
-    for prop, val in pairs(self._startValues) do
-        self._tween.Instance[prop] = val
-    end
-end
+-- ============================================================
+--// PUBLIC METHODS (TweenPlus)
+-- ============================================================
 
-function TweenHandle:_cleanup()
-    self._tween, self._chain, self._loopOriginal, self._startValues = nil,nil,nil,nil
-end
-
----------------------------------------------------------------
--- PUBLIC (module): Create / Debug
----------------------------------------------------------------
-function TweenPlus:Create(inst, info: TweenInfo, goals: table)
+--[[
+Function: Create
+Description: Initializes a new tween for the given instance with the specified TweenInfo and goals.
+             Records the instance's starting values to support rewinding and chaining,
+             and returns a TweenHandle for controlling the tween using TweenPlus features.
+Parameters:
+    - <inst> (Instance) - The Roblox Instance whose properties will be tweened.
+    - <info> (TweenInfo) - Defines the timing and easing behavior of the tween.
+    - <goals> (table) - A table of property names and target values to tween toward.
+Returns:
+    - (TweenHandle) - A TweenHandle object for managing playback, chaining, and rewinding.
+Notes:
+    - Automatically records starting property values so tweens can be rewound if needed.
+]]
+function TweenPlus:Create(inst, info, goals)
     local tween = TweenService:Create(inst, info, goals)
 
     -- capture start values for rewind
@@ -225,14 +334,36 @@ function TweenPlus:Create(inst, info: TweenInfo, goals: table)
     for prop in pairs(goals) do
         start[prop] = inst[prop]
     end
-    return newHandle(tween, start)
+    return _newHandle(tween, start)
 end
 
-function TweenPlus:Debug(msg) print("[TweenPlus]", msg); return self end
+--[[
+Function: Debug
+Description: Prints a custom debug message to the console, prefixed with the module label [TweenPlus].
+Parameters:
+    - <message> (string) - The custom debug message to print to the console.
+Returns:
+    - (TweenPlus) - The TweenPlus object for chaining.
+Notes:
+    - Useful for confirming TweenPlus module behavior during development.
+]]
+function TweenPlus:Debug(message)
+    print("[TweenPlus]", message)
+    return self
+end
 
----------------------------------------------------------------
--- PUBLIC (module): Batch cancel helpers
----------------------------------------------------------------
+--[[
+Function: CancelByTag
+Description: Cancels all ongoing tween chains associated with the specified tag.
+             For each matching tween, runs the function assigned to the OnCancel flag,
+             stops the tween, disconnects events, and performs internal cleanup.
+Parameters:
+    - <tag> (string) - The tag name identifying tweens to cancel.
+Returns:
+    - None
+Notes:
+    - After cancellation, no further tweens or chained functions will execute.
+]]
 function TweenPlus:CancelByTag(tag)
     local bucket = _handlesByTag[tag]
     if not bucket then return end
@@ -245,8 +376,20 @@ function TweenPlus:CancelByTag(tag)
     _handlesByTag[tag] = nil
 end
 
-function TweenPlus:CancelByInstance(inst)
-    local bucket = _handlesByInstance[inst]
+--[[
+Function: CancelByInstance
+Description: Cancels all ongoing tween chains associated with a specific instance.
+             For each matching tween, runs the function assigned to the OnCancel flag,
+             stops the tween, disconnects events, and performs internal cleanup.
+Parameters:
+    - <instance> (Instance) - The Roblox Instance whose associated tweens should be canceled.
+Returns:
+    - None
+Notes:
+    - After cancellation, no further tweens or chained functions will execute.
+]]
+function TweenPlus:CancelByInstance(instance)
+    local bucket = _handlesByInstance[instance]
     if not bucket then return end
     for i = #bucket, 1, -1 do
         if bucket[i] then
@@ -254,12 +397,22 @@ function TweenPlus:CancelByInstance(inst)
         end
         bucket[i] = nil
     end
-    _handlesByInstance[inst] = nil
+    _handlesByInstance[instance] = nil
 end
 
----------------------------------------------------------------
--- PUBLIC (module): Preset registry
----------------------------------------------------------------
+--[[
+Function: CreatePreset
+Description: Registers a reusable tween preset with a given name, TweenInfo, and goals table.
+             Presets can later be applied to any instance using ApplyPreset.
+Parameters:
+    - <name> (string) - The name to assign to the preset.
+    - <info> (TweenInfo) - Defines the timing and easing behavior of the tween.
+    - <goals> (table) - A table of property names and target values to tween toward.
+Returns:
+    - (TweenPlus) - The TweenPlus object for chaining.
+Notes:
+    - Calling this again with the same name will overwrite the existing preset.
+]]
 function TweenPlus:CreatePreset(name, info, goals)
     assert(type(name) == "string" and #name > 0, "invalid preset name")
     assert(typeof(info) == "TweenInfo", "second arg must be TweenInfo")
@@ -267,10 +420,21 @@ function TweenPlus:CreatePreset(name, info, goals)
     return self
 end
 
-function TweenPlus:ApplyPreset(name, inst)
+--[[
+Function: ApplyPreset
+Description: Applies a previously registered tween preset to a specific instance.
+             Internally creates and returns a TweenHandle using the preset's TweenInfo and goals.
+Parameters:
+    - <name> (string) - The name of the preset to apply.
+    - <instance> (Instance) - The Roblox Instance to apply the preset tween to.
+Returns:
+    - (TweenHandle) - A TweenHandle object for chaining and controlling the tween.
+]]
+function TweenPlus:ApplyPreset(name, instance)
     local p = _presets[name]
     assert(p, ("No preset %q registered"):format(name))
-    return self:Create(inst, p.tweenInfo, p.goals)
+    return self:Create(instance, p.tweenInfo, p.goals)
 end
 
+--// RETURN MODULE
 return TweenPlus
